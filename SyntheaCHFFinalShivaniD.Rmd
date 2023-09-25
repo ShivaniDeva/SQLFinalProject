@@ -1,0 +1,291 @@
+---
+title: "Synthea Report CHF "
+author: "Shivani D"
+date: "2022-12-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#| warning: false
+library(tidyverse)     # loads the tidyverse tools
+library(RPostgres)     # loads the database driver for PostgreSQL
+library(connections)   # helps RPostgres work with RStudio
+library(keyring)       # access to a local encrypted keychain for passwords
+con <- connection_open(RPostgres::Postgres(),
+          dbname = "syntheticMGUH2022",
+          host = "35.199.26.47",
+          user = "hids502_student",
+          password = key_get(service = "syntheticmguh", 
+                             username = "hids502_student"),
+          bigint = "numeric")
+# Use this to set a default connection for every SQL chunk
+# There seems to be some sort of bug in Quarto that requires this
+knitr::opts_chunk$set(connection = "con")
+```
+
+## Introduction
+
+This report serves as a way to exemplify the issue that there are Congestive Health Failure (CHF) patients who have records of having their weight recorded but are not getting daily Telehealth visits to monitor their weight. There is no way to see that the patients are being called daily and if they are having weight captures done at the time of their visits which is the problem we aim to fix.
+
+## Selecting Patients with CHF
+
+The initial assessment was to gather a list of patients from the conditions, encounters, medications and careplans tables who are noted as having CHF. There are 847 patients overall with CHF. From here I created a temporary table with the patients who have CHF and also have a record of having telehealth encounter, and how many telehelath visits they have had and their last telehelath visit overall for CHF. We selected for the people who are currently alive and were able to see that 66 patients of the 847 CHF have a a record of CHF. We of these patients only 20 have a record of having CHF and telehealth visits and 46 have a record of having CHF but no telehealth visits at all. These 46 patients are who we are taking an interest in because we see that they have recorded weights but no record of having a telehealth visit. Overall 7.79 % of the people have CHF who are alive and have records of having and not having TH visits recorded.
+
+```{sql connection=con}
+--CTE that shows how many CHF patients exists overall
+WITH CHFPatients AS(
+select distinct patient, start as chfonset
+from conditions
+where description like '%Chronic congestive heart failure (disorder)%' and code = '88805009'
+Union 
+select distinct patient , start as chfonset
+from encounters 
+where  reasondescription like '%Chronic congestive heart failure (disorder)%' 
+union 
+select distinct patient , start as chfonset
+from careplans 
+where reasondescription like '%Chronic congestive heart failure (disorder)%' and code = '88805009'
+UNION
+select distinct patient , start as chfonset
+from medications 
+where reasondescription like '%Chronic congestive heart failure (disorder)%'
+)
+select count(distinct patient) as patients from CHFPatients
+```
+
+```{sql connection=con}
+DROP TABLE IF EXISTS CHF; 
+```
+
+```{sql connection=con}
+-- Temp Table with the CHF patients who are alive, counting how many TH visits if they have them or not and getting all other data.
+WITH CHFPatients AS(
+select distinct patient, start as chfonset
+from conditions
+where description like '%Chronic congestive heart failure (disorder)%' and code = '88805009'
+Union 
+select distinct patient , start as chfonset
+from encounters 
+where  reasondescription like '%Chronic congestive heart failure (disorder)%' 
+union 
+select distinct patient , start as chfonset
+from careplans 
+where reasondescription like '%Chronic congestive heart failure (disorder)%' and code = '88805009'
+UNION
+select distinct patient , start as chfonset
+from medications 
+where reasondescription like '%Chronic congestive heart failure (disorder)%'
+),
+CHFcohort AS (
+  SELECT patient, CAST(min(chfonset) as DATE) AS chfonset
+  FROM CHFPatients
+  GROUP BY patient
+  ),
+TelehealthVisits AS(
+select CHFcohort.patient, count(encounters.id) as telemedicine_chf_encounters, min(encounters.start) as firsttelemedchfencounter, max(encounters.stop) as lasttelehealthvisitCHF
+from CHFcohort
+LEFT Join encounters on encounters.patient = CHFcohort.patient
+where description like '%Telemedicine consultation with patient%' and reasondescription like '%Chronic congestive heart failure (disorder)%' 
+and encounters.start >= '2021-09-24'
+group by chfcohort.patient
+)
+select patients.id as patient, chfonset, telemedicine_chf_encounters, firsttelemedchfencounter,
+       lasttelehealthvisitCHF, birthdate, deathdate, race, ethnicity, gender
+ INTO TEMP CHF
+ FROM CHFcohort
+ INNER JOIN patients ON patients.id = CHFcohort.patient
+ LEFT JOIN TelehealthVisits on  TelehealthVisits.patient = CHFcohort.patient
+ WHERE deathdate IS NULL 
+```
+
+```{sql connection=con}
+select * from CHF 
+```
+
+```{r}
+totalchfpts <- 847
+currentcohort <-66
+formulaforCHFTH <- (currentcohort/totalchfpts)*100
+formulaforCHFTH
+```
+
+## Demographics
+
+In the demographics we can see that 65% of the population are 60 and older, 21% are in the age cohort of 51-60 years, 10% in the 41-50 age group and 1 % who are 18-30 years old. 39% are females, 60% are males. The youngest person to have CHF was 29 years old, the average age was 66 years old and the oldest person in this cohort to have CHF is is 85 years old. CHF has affected African american patients the most in this cohort where 33 of the 66 patients were affected, 31 were Caucasian, 1 person who is Asian and another 1 person who is Hawaiian. Of these 66 patients 26 were females (39.4%) and 40 were males (60.6%).
+
+```{sql connection=con}
+-- Grouping by different ages to see which age breakdown of CHF patients 
+with AgeofPatients as (
+select distinct patient as numofpatients, DATE_PART('YEAR', AGE(chfonset, birthdate))  ages, chfonset
+	 from CHF)
+select  SUM(CASE WHEN AGES <= 18  THEN 1 ELSE 0 END) AS "1-17",
+	    SUM(CASE WHEN AGES > 18 AND AGES <= 30 THEN 1 ELSE 0 END) AS "18-30",
+        SUM(CASE WHEN AGES > 30 AND AGES <= 40 THEN 1 ELSE 0 END) AS "31-40",
+		SUM(CASE WHEN AGES > 40 ANd AGES <= 50 THEN 1 ELSE 0 END) AS "41-50",
+		SUM(CASE WHEN AGES > 51 ANd AGES <= 60 THEN 1 ELSE 0 END) AS "51-60",
+		SUM(CASE WHEN AGES > 60 THEN 1 ELSE 0 END) AS "Above 60" 
+from AgeofPatients
+```
+
+```{r}
+above60 <- 43
+totalchfpts <- 66
+ageabove60 <- (above60/totalchfpts)*100
+ageabove60
+```
+
+```{r}
+age50s <- 14
+totalchfpts <- 66
+ageabove50 <- (age50s/totalchfpts)*100
+ageabove50
+```
+
+```{r}
+age40s <- 7
+totalchfpts <- 66
+ageabove40 <- (age40s/totalchfpts)*100
+ageabove40
+```
+
+```{r}
+age18thru20 <- 1
+totalchfpts <- 66
+ageabove18 <- (age18thru20/totalchfpts)*100
+ageabove18
+```
+
+```{sql connection=con}
+select AVG(DATE_PART('YEAR', AGE(chfonset, birthdate))) as averageage from CHF
+```
+
+```{sql connection=con}
+select MIN(DATE_PART('YEAR', AGE(chfonset, birthdate))) as minimumage from CHF
+```
+
+```{sql connection=con}
+select MAX(DATE_PART('YEAR', AGE(chfonset, birthdate))) as maxmumage from CHF
+```
+
+```{sql connection=con}
+select count(distinct patient) as patient, race from CHF
+group by race
+```
+
+```{r}
+africanamerican <- 33
+overallCHFTHpts<- 66
+race_aa <- (africanamerican/overallCHFTHpts)*100
+race_aa
+```
+
+```{r}
+caucasian <- 31
+overallCHFTHpts<- 66
+race_caucasian <- (caucasian/overallCHFTHpts)*100
+race_caucasian
+```
+
+```{r}
+asian <- 1
+overallCHFTHpts<- 66
+race_asian <- (asian/overallCHFTHpts)*100
+race_asian
+```
+
+```{r}
+hawaiian <- 1
+overallCHFTHpts<- 66
+race_hawaiian <- (hawaiian/overallCHFTHpts)*100
+race_hawaiian
+```
+
+```{sql connection=con}
+select count(distinct patient) as patient, gender from CHF
+group by gender
+```
+
+```{r}
+females <- 26
+overallCHFTHpts<- 66
+femaleswithCHF <- (females/overallCHFTHpts)*100
+femaleswithCHF
+```
+
+```{r}
+males <- 40
+overallCHFTHpts<- 66
+maleswithCHF <- (males/overallCHFTHpts)*100
+maleswithCHF
+```
+
+## Patient Weight Caputures
+
+It is here we see how many overall days its been since each patient has had telehelath visits. The least amount of time someone had a telehealth visit was for 15 minutues and after that no other record was seen for that patient. Some people have had lots of time pass from the start of their initial telehealth visit and their last. As shown below both cohorts of non-telehealth and telehealth patients weights are shown from their previous records and how much it has changed. We can see that some patients have stable weights and some do not. For those who do not have telehealth visits their weights have to be monitored because we need to see what their overall trend is in weight gain/loss. We also have looked at a difference in BMI to see if there are any drastic changes as that is also an indicator that contributes to weight gain/loss. Other factors are influencing weight changes so providers can make changes to their CHF plan.
+
+```{sql connection=con}
+-- seeing how many days a TH visit for the patients are over time
+select firsttelemedchfencounter, lasttelehealthvisitchf, lasttelehealthvisitchf-firsttelemedchfencounter as dayselapsed
+from CHF
+order by dayselapsed
+```
+
+```{sql connection=con}
+select * from CHF where firsttelemedchfencounter IS NOT NULL
+```
+
+```{sql connection=con}
+-- CTE that shows those who have TH visits with weight captures and how much it has changed
+With THRecordedWeights AS(
+select distinct CHF.patient, chfonset, observations.value, lag(cast(observations.value as numeric)) OVER(PARTITION by CHF.patient ORDER BY observations.value)  as laginweight, cast(observations.value as numeric) - lag(cast(observations.value as numeric)) OVER(PARTITION by CHF.patient ORDER BY observations.value)  as differenceinweight, firsttelemedchfencounter,lasttelehealthvisitchf 
+from CHF 
+inner join observations on observations.patient = CHF.Patient
+where LOWER(observations.description) like '%body weight%' AND firsttelemedchfencounter IS NOT NULL
+)
+select * from THRecordedWeights
+```
+
+```{sql connection=con}
+-- CTE that shows those who have TH visits with BMI captures and how much it has changed
+With THRecordedBMI AS(
+select distinct CHF.patient, chfonset, observations.value, lag(cast(observations.value as numeric)) OVER(PARTITION by CHF.patient ORDER BY observations.value)  as laginBMI, cast(observations.value as numeric) - lag(cast(observations.value as numeric)) OVER(PARTITION by CHF.patient ORDER BY observations.value)  as differenceinBMI, firsttelemedchfencounter,lasttelehealthvisitchf 
+from CHF 
+inner join observations on observations.patient = CHF.Patient
+where LOWER(observations.description) like '%body mass index%' AND firsttelemedchfencounter IS NOT NULL
+)
+select * from THRecordedBMI
+```
+
+```{sql connection=con}
+select * from CHF where firsttelemedchfencounter IS  NULL
+```
+
+```{sql connection=con}
+-- CTE that shows those who do not have TH visits with weight captures and how much it has changed
+WITH NOTHVISITWEIGHTS AS(
+select distinct CHF.patient, chfonset, observations.value, lag(cast(observations.value as numeric)) OVER( PARTITION by CHF.patient ORDER BY observations.value)  as laginweight, cast(observations.value as numeric) - lag(cast(observations.value as numeric)) OVER( PARTITION by CHF.patient ORDER BY observations.value)  as differenceinweight, firsttelemedchfencounter 
+from CHF 
+inner join observations on observations.patient = CHF.Patient
+where LOWER(observations.description) like '%body weight%' AND firsttelemedchfencounter IS NULL)
+select *
+from NOTHVISITWEIGHTS
+```
+
+```{sql connection=con}
+-- CTE that shows those who do not have TH visits with BMI captures and how much it has changed
+WITH NOTHVISITBMI AS(
+select distinct CHF.patient, chfonset, observations.value, lag(cast(observations.value as numeric)) OVER(PARTITION by CHF.patient ORDER BY observations.value)  as laginBMI, cast(observations.value as numeric) - lag(cast(observations.value as numeric)) OVER( PARTITION by CHF.patient ORDER BY observations.value)  as differenceinBMI, firsttelemedchfencounter 
+from CHF 
+inner join observations on observations.patient = CHF.Patient
+where LOWER(observations.description) like '%body mass index%' AND firsttelemedchfencounter IS NULL)
+select *
+from NOTHVISITBMI
+```
+
+## Conclusion
+
+Overall we are able to see that CHF patients are getting their weights monitored but it is not happening daily. This presents and issue because according to the guidelines, patients shouldn't be gaining 2lbs of weight overnight or within a 24-48 hour period. The evidence here shows that while the weights are being recorded per patient, it is not being done daily just at sporadic points in time. This can lead to missing data which we do not want when trying to implement a new workflow. For the 46 patients who have recorded weights but no telehealth visits the intervention would show that their weight is being monitored overtime and is done so consistently. This then will help the provider see how their CHF progression is in relation to their change in weight. We also looked at BMI to give the provider an overall picture. Because this data wasn't taken daily the change in weight and BMI we see is from point A to point B and while these patients seem to have a good hang of their weight management, they could've lost or gained weight in between and that data is not known. Because of this we aim to propose the intervention of daily telehealth monitoring so all patients get consistent data points across the board.
